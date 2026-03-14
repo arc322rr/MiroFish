@@ -5,153 +5,69 @@
 
 import json
 from typing import Dict, Any, List, Optional
+from ..config import Config
 from ..utils.llm_client import LLMClient
 
 
 # 本体生成的系统提示词
-ONTOLOGY_SYSTEM_PROMPT = """你是一个专业的知识图谱本体设计专家。你的任务是分析给定的文本内容和模拟需求，设计适合**社交媒体舆论模拟**的实体类型和关系类型。
+ONTOLOGY_SYSTEM_PROMPT = """Ты эксперт по проектированию онтологий для графов знаний в задачах моделирования общественных дискуссий в соцмедиа.
 
-**重要：你必须输出有效的JSON格式数据，不要输出任何其他内容。**
+Важно:
+- Верни только валидный JSON, без markdown и без пояснений вне JSON.
+- Текстовые пояснения для человека (например, analysis_summary) пиши на русском языке.
+- Технические идентификаторы сохраняй на английском (типов, атрибутов и связей).
 
-## 核心任务背景
+Контекст задачи:
+- Каждый entity в этой системе — это реальный актор, который может публиковать, комментировать, реагировать и влиять на других.
+- Нужно смоделировать распространение информации, реакции групп и взаимовлияние.
 
-我们正在构建一个**社交媒体舆论模拟系统**。在这个系统中：
-- 每个实体都是一个可以在社交媒体上发声、互动、传播信息的"账号"或"主体"
-- 实体之间会相互影响、转发、评论、回应
-- 我们需要模拟舆论事件中各方的反应和信息传播路径
+Требования к типам сущностей:
+1. Ровно 10 entity_types.
+2. Последние 2 типа в списке должны быть fallback-типы:
+   - Person
+   - Organization
+3. Первые 8 типов — конкретные роли, выведенные из входного текста.
+4. Сущности должны быть только реальными акторами (люди, организации, медиа, платформы, органы власти и т.д.).
+5. Запрещены абстракции: «мнение», «тренд», «эмоция», «позиция», «тема» и т.п.
 
-因此，**实体必须是现实中真实存在的、可以在社媒上发声和互动的主体**：
+Требования к relationship-типам:
+- От 6 до 10 edge_types.
+- Типы связей должны отражать реальные социальные/информационные взаимодействия.
+- source_targets должны ссылаться на определенные entity_types.
 
-**可以是**：
-- 具体的个人（公众人物、当事人、意见领袖、专家学者、普通人）
-- 公司、企业（包括其官方账号）
-- 组织机构（大学、协会、NGO、工会等）
-- 政府部门、监管机构
-- 媒体机构（报纸、电视台、自媒体、网站）
-- 社交媒体平台本身
-- 特定群体代表（如校友会、粉丝团、维权群体等）
+Требования к атрибутам:
+- 1-3 ключевых атрибута на тип сущности.
+- Имена атрибутов: английский snake_case.
+- Не использовать зарезервированные имена: name, uuid, group_id, created_at, summary.
 
-**不可以是**：
-- 抽象概念（如"舆论"、"情绪"、"趋势"）
-- 主题/话题（如"学术诚信"、"教育改革"）
-- 观点/态度（如"支持方"、"反对方"）
-
-## 输出格式
-
-请输出JSON格式，包含以下结构：
-
-```json
+Формат ответа (строго):
 {
-    "entity_types": [
+  "entity_types": [
+    {
+      "name": "PascalCase на английском",
+      "description": "Краткое описание на английском, <=100 символов",
+      "attributes": [
         {
-            "name": "实体类型名称（英文，PascalCase）",
-            "description": "简短描述（英文，不超过100字符）",
-            "attributes": [
-                {
-                    "name": "属性名（英文，snake_case）",
-                    "type": "text",
-                    "description": "属性描述"
-                }
-            ],
-            "examples": ["示例实体1", "示例实体2"]
+          "name": "snake_case на английском",
+          "type": "text",
+          "description": "Краткое описание атрибута на русском"
         }
-    ],
-    "edge_types": [
-        {
-            "name": "关系类型名称（英文，UPPER_SNAKE_CASE）",
-            "description": "简短描述（英文，不超过100字符）",
-            "source_targets": [
-                {"source": "源实体类型", "target": "目标实体类型"}
-            ],
-            "attributes": []
-        }
-    ],
-    "analysis_summary": "对文本内容的简要分析说明（中文）"
+      ],
+      "examples": ["пример 1", "пример 2"]
+    }
+  ],
+  "edge_types": [
+    {
+      "name": "UPPER_SNAKE_CASE на английском",
+      "description": "Краткое описание на английском, <=100 символов",
+      "source_targets": [
+        {"source": "SourceEntityType", "target": "TargetEntityType"}
+      ],
+      "attributes": []
+    }
+  ],
+  "analysis_summary": "Короткое объяснение выбора типов и связей на русском"
 }
-```
-
-## 设计指南（极其重要！）
-
-### 1. 实体类型设计 - 必须严格遵守
-
-**数量要求：必须正好10个实体类型**
-
-**层次结构要求（必须同时包含具体类型和兜底类型）**：
-
-你的10个实体类型必须包含以下层次：
-
-A. **兜底类型（必须包含，放在列表最后2个）**：
-   - `Person`: 任何自然人个体的兜底类型。当一个人不属于其他更具体的人物类型时，归入此类。
-   - `Organization`: 任何组织机构的兜底类型。当一个组织不属于其他更具体的组织类型时，归入此类。
-
-B. **具体类型（8个，根据文本内容设计）**：
-   - 针对文本中出现的主要角色，设计更具体的类型
-   - 例如：如果文本涉及学术事件，可以有 `Student`, `Professor`, `University`
-   - 例如：如果文本涉及商业事件，可以有 `Company`, `CEO`, `Employee`
-
-**为什么需要兜底类型**：
-- 文本中会出现各种人物，如"中小学教师"、"路人甲"、"某位网友"
-- 如果没有专门的类型匹配，他们应该被归入 `Person`
-- 同理，小型组织、临时团体等应该归入 `Organization`
-
-**具体类型的设计原则**：
-- 从文本中识别出高频出现或关键的角色类型
-- 每个具体类型应该有明确的边界，避免重叠
-- description 必须清晰说明这个类型和兜底类型的区别
-
-### 2. 关系类型设计
-
-- 数量：6-10个
-- 关系应该反映社媒互动中的真实联系
-- 确保关系的 source_targets 涵盖你定义的实体类型
-
-### 3. 属性设计
-
-- 每个实体类型1-3个关键属性
-- **注意**：属性名不能使用 `name`、`uuid`、`group_id`、`created_at`、`summary`（这些是系统保留字）
-- 推荐使用：`full_name`, `title`, `role`, `position`, `location`, `description` 等
-
-## 实体类型参考
-
-**个人类（具体）**：
-- Student: 学生
-- Professor: 教授/学者
-- Journalist: 记者
-- Celebrity: 明星/网红
-- Executive: 高管
-- Official: 政府官员
-- Lawyer: 律师
-- Doctor: 医生
-
-**个人类（兜底）**：
-- Person: 任何自然人（不属于上述具体类型时使用）
-
-**组织类（具体）**：
-- University: 高校
-- Company: 公司企业
-- GovernmentAgency: 政府机构
-- MediaOutlet: 媒体机构
-- Hospital: 医院
-- School: 中小学
-- NGO: 非政府组织
-
-**组织类（兜底）**：
-- Organization: 任何组织机构（不属于上述具体类型时使用）
-
-## 关系类型参考
-
-- WORKS_FOR: 工作于
-- STUDIES_AT: 就读于
-- AFFILIATED_WITH: 隶属于
-- REPRESENTS: 代表
-- REGULATES: 监管
-- REPORTS_ON: 报道
-- COMMENTS_ON: 评论
-- RESPONDS_TO: 回应
-- SUPPORTS: 支持
-- OPPOSES: 反对
-- COLLABORATES_WITH: 合作
-- COMPETES_WITH: 竞争
 """
 
 
@@ -223,33 +139,36 @@ class OntologyGenerator:
         # 如果文本超过5万字，截断（仅影响传给LLM的内容，不影响图谱构建）
         if len(combined_text) > self.MAX_TEXT_LENGTH_FOR_LLM:
             combined_text = combined_text[:self.MAX_TEXT_LENGTH_FOR_LLM]
-            combined_text += f"\n\n...(原文共{original_length}字，已截取前{self.MAX_TEXT_LENGTH_FOR_LLM}字用于本体分析)..."
+            combined_text += f"\n\n...(исходный текст: {original_length} символов, для анализа переданы первые {self.MAX_TEXT_LENGTH_FOR_LLM})..."
         
-        message = f"""## 模拟需求
+        target_language = getattr(Config, "LLM_OUTPUT_LANGUAGE", "ru")
+        target_language_label = "русском" if str(target_language).lower().startswith("ru") else str(target_language)
+        message = f"""## Требование к симуляции
 
 {simulation_requirement}
 
-## 文档内容
+## Содержимое документов
 
 {combined_text}
 """
         
         if additional_context:
             message += f"""
-## 额外说明
+## Дополнительный контекст
 
 {additional_context}
 """
         
-        message += """
-请根据以上内容，设计适合社会舆论模拟的实体类型和关系类型。
+        message += f"""
+Сформируй онтологию для моделирования общественной дискуссии в соцмедиа.
 
-**必须遵守的规则**：
-1. 必须正好输出10个实体类型
-2. 最后2个必须是兜底类型：Person（个人兜底）和 Organization（组织兜底）
-3. 前8个是根据文本内容设计的具体类型
-4. 所有实体类型必须是现实中可以发声的主体，不能是抽象概念
-5. 属性名不能使用 name、uuid、group_id 等保留字，用 full_name、org_name 等替代
+Обязательные правила:
+1. Ровно 10 entity_types.
+2. Последние 2 типа: Person и Organization.
+3. Первые 8 типов — конкретные роли из текста.
+4. Никаких абстрактных сущностей, только реальные акторы.
+5. Не использовать зарезервированные имена атрибутов: name, uuid, group_id, created_at, summary.
+6. analysis_summary и описания для людей пиши на языке: {target_language_label}.
 """
         
         return message
@@ -450,4 +369,3 @@ class OntologyGenerator:
         code_lines.append('}')
         
         return '\n'.join(code_lines)
-

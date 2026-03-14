@@ -319,7 +319,7 @@ class AgentInterview:
                 # 过滤包含问题编号的垃圾内容（问题1-9）
                 skip = False
                 for d in '123456789':
-                    if f'\u95ee\u9898{d}' in clean_quote:
+                    if f'\u95ee\u9898{d}' in clean_quote or f'Вопрос {d}' in clean_quote or f'Вопрос{d}' in clean_quote:
                         skip = True
                         break
                 if skip:
@@ -420,6 +420,9 @@ class ZepToolsService:
     # 重试配置
     MAX_RETRIES = 3
     RETRY_DELAY = 2.0
+    # Zep Search API 限制：query 最长 400 字符
+    # 预留余量避免边界失败
+    MAX_ZEP_QUERY_LENGTH = 380
     
     def __init__(self, api_key: Optional[str] = None, llm_client: Optional[LLMClient] = None):
         self.api_key = api_key or Config.ZEP_API_KEY
@@ -460,6 +463,14 @@ class ZepToolsService:
                     logger.error(f"Zep {operation_name} 在 {max_retries} 次尝试后仍失败: {str(e)}")
         
         raise last_exception
+
+    @classmethod
+    def _normalize_search_query(cls, query: str) -> str:
+        """清理并截断搜索 query，避免触发 Zep 400 字符限制。"""
+        q = (query or "").replace("\n", " ").strip()
+        if len(q) <= cls.MAX_ZEP_QUERY_LENGTH:
+            return q
+        return q[:cls.MAX_ZEP_QUERY_LENGTH].rstrip()
     
     def search_graph(
         self, 
@@ -483,14 +494,17 @@ class ZepToolsService:
         Returns:
             SearchResult: 搜索结果
         """
-        logger.info(f"图谱搜索: graph_id={graph_id}, query={query[:50]}...")
+        safe_query = self._normalize_search_query(query)
+        logger.info(f"图谱搜索: graph_id={graph_id}, query={safe_query[:50]}...")
+        if query and len(query) > len(safe_query):
+            logger.info(f"搜索query过长，已截断: {len(query)} -> {len(safe_query)} 字符")
         
         # 尝试使用Zep Cloud Search API
         try:
             search_results = self._call_with_retry(
                 func=lambda: self.client.graph.search(
                     graph_id=graph_id,
-                    query=query,
+                    query=safe_query,
                     limit=limit,
                     scope=scope,
                     reranker="cross_encoder"
@@ -534,14 +548,14 @@ class ZepToolsService:
                 facts=facts,
                 edges=edges,
                 nodes=nodes,
-                query=query,
+                query=safe_query,
                 total_count=len(facts)
             )
             
         except Exception as e:
             logger.warning(f"Zep Search API失败，降级为本地搜索: {str(e)}")
             # 降级：使用本地关键词匹配搜索
-            return self._local_search(graph_id, query, limit, scope)
+            return self._local_search(graph_id, safe_query, limit, scope)
     
     def _local_search(
         self, 
@@ -1101,23 +1115,26 @@ class ZepToolsService:
         
         将复杂问题分解为多个可以独立检索的子问题
         """
-        system_prompt = """你是一个专业的问题分析专家。你的任务是将一个复杂问题分解为多个可以在模拟世界中独立观察的子问题。
+        output_language = getattr(Config, "LLM_OUTPUT_LANGUAGE", "ru")
+        system_prompt = """Ты эксперт по декомпозиции аналитических вопросов.
+Разбей сложный запрос на подзадачи, которые можно проверять в мире симуляции отдельно.
 
-要求：
-1. 每个子问题应该足够具体，可以在模拟世界中找到相关的Agent行为或事件
-2. 子问题应该覆盖原问题的不同维度（如：谁、什么、为什么、怎么样、何时、何地）
-3. 子问题应该与模拟场景相关
-4. 返回JSON格式：{"sub_queries": ["子问题1", "子问题2", ...]}"""
+Требования:
+1. Подзапросы должны быть конкретными и наблюдаемыми через действия Agent/события.
+2. Покрой разные ракурсы (кто, что, почему, как, когда, где).
+3. Подзапросы должны соответствовать контексту симуляции.
+4. Верни JSON формата: {"sub_queries": ["...", "..."]}.
+5. Текст подзапросов пиши на русском языке."""
 
-        user_prompt = f"""模拟需求背景：
+        user_prompt = f"""Контекст симуляции:
 {simulation_requirement}
 
-{f"报告上下文：{report_context[:500]}" if report_context else ""}
+{f"Контекст отчета: {report_context[:500]}" if report_context else ""}
 
-请将以下问题分解为{max_queries}个子问题：
+Разбей следующий вопрос на {max_queries} подзапросов:
 {query}
 
-返回JSON格式的子问题列表。"""
+Верни только JSON. Язык подзапросов: {output_language}."""
 
         try:
             response = self.llm.chat_json(
@@ -1137,9 +1154,9 @@ class ZepToolsService:
             # 降级：返回基于原问题的变体
             return [
                 query,
-                f"{query} 的主要参与者",
-                f"{query} 的原因和影响",
-                f"{query} 的发展过程"
+                f"Ключевые участники: {query}",
+                f"Причины и последствия: {query}",
+                f"Динамика развития: {query}"
             ][:max_queries]
     
     def panorama_search(
@@ -1350,15 +1367,16 @@ class ZepToolsService:
         
         # 添加优化前缀，约束Agent回复格式
         INTERVIEW_PROMPT_PREFIX = (
-            "你正在接受一次采访。请结合你的人设、所有的过往记忆与行动，"
-            "以纯文本方式直接回答以下问题。\n"
-            "回复要求：\n"
-            "1. 直接用自然语言回答，不要调用任何工具\n"
-            "2. 不要返回JSON格式或工具调用格式\n"
-            "3. 不要使用Markdown标题（如#、##、###）\n"
-            "4. 按问题编号逐一回答，每个回答以「问题X：」开头（X为问题编号）\n"
-            "5. 每个问题的回答之间用空行分隔\n"
-            "6. 回答要有实质内容，每个问题至少回答2-3句话\n\n"
+            "Ты проходишь интервью. Учитывай свой профиль, память и прошлые действия, "
+            "и отвечай на вопросы обычным текстом.\n"
+            "Требования к ответу:\n"
+            "1. Отвечай естественным языком, без вызова инструментов\n"
+            "2. Не возвращай JSON и не используй формат tool_call\n"
+            "3. Не используй markdown-заголовки (#, ##, ###)\n"
+            "4. Отвечай по номеру каждого вопроса в формате «Вопрос X: ...»\n"
+            "5. Разделяй ответы на вопросы пустой строкой\n"
+            "6. На каждый вопрос дай минимум 2-3 содержательные фразы\n"
+            "7. Пиши на русском языке\n\n"
         )
         optimized_prompt = f"{INTERVIEW_PROMPT_PREFIX}{combined_prompt}"
         
@@ -1389,7 +1407,7 @@ class ZepToolsService:
             if not api_result.get("success", False):
                 error_msg = api_result.get("error", "未知错误")
                 logger.warning(f"采访API返回失败: {error_msg}")
-                result.summary = f"采访API调用失败：{error_msg}。请检查OASIS模拟环境状态。"
+                result.summary = f"Ошибка вызова API интервью: {error_msg}. Проверьте состояние среды OASIS."
                 return result
             
             # Step 5: 解析API返回结果，构建AgentInterview对象
@@ -1415,9 +1433,9 @@ class ZepToolsService:
                 reddit_response = self._clean_tool_call_response(reddit_response)
 
                 # 始终输出双平台标记
-                twitter_text = twitter_response if twitter_response else "（该平台未获得回复）"
-                reddit_text = reddit_response if reddit_response else "（该平台未获得回复）"
-                response_text = f"【Twitter平台回答】\n{twitter_text}\n\n【Reddit平台回答】\n{reddit_text}"
+                twitter_text = twitter_response if twitter_response else "(на платформе не получен ответ)"
+                reddit_text = reddit_response if reddit_response else "(на платформе не получен ответ)"
+                response_text = f"【Ответ в Twitter】\n{twitter_text}\n\n【Ответ в Reddit】\n{reddit_text}"
 
                 # 提取关键引言（从两个平台的回答中）
                 import re
@@ -1428,6 +1446,7 @@ class ZepToolsService:
                 clean_text = re.sub(r'\{[^}]*tool_name[^}]*\}', '', clean_text)
                 clean_text = re.sub(r'[*_`|>~\-]{2,}', '', clean_text)
                 clean_text = re.sub(r'问题\d+[：:]\s*', '', clean_text)
+                clean_text = re.sub(r'Вопрос\s*\d+\s*[:：]\s*', '', clean_text, flags=re.IGNORECASE)
                 clean_text = re.sub(r'【[^】]+】', '', clean_text)
 
                 # 策略1（主）: 提取完整的有实质内容的句子
@@ -1436,7 +1455,7 @@ class ZepToolsService:
                     s.strip() for s in sentences
                     if 20 <= len(s.strip()) <= 150
                     and not re.match(r'^[\s\W，,；;：:、]+', s.strip())
-                    and not s.strip().startswith(('{', '问题'))
+                    and not s.strip().startswith(('{', '问题', 'Вопрос'))
                 ]
                 meaningful.sort(key=len, reverse=True)
                 key_quotes = [s + "。" for s in meaningful[:3]]
@@ -1462,13 +1481,13 @@ class ZepToolsService:
         except ValueError as e:
             # 模拟环境未运行
             logger.warning(f"采访API调用失败（环境未运行？）: {e}")
-            result.summary = f"采访失败：{str(e)}。模拟环境可能已关闭，请确保OASIS环境正在运行。"
+            result.summary = f"Интервью не выполнено: {str(e)}. Возможно, среда симуляции остановлена. Убедитесь, что OASIS запущен."
             return result
         except Exception as e:
             logger.error(f"采访API调用异常: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            result.summary = f"采访过程发生错误：{str(e)}"
+            result.summary = f"Во время интервью произошла ошибка: {str(e)}"
             return result
         
         # Step 6: 生成采访摘要
@@ -1577,30 +1596,34 @@ class ZepToolsService:
             }
             agent_summaries.append(summary)
         
-        system_prompt = """你是一个专业的采访策划专家。你的任务是根据采访需求，从模拟Agent列表中选择最适合采访的对象。
+        output_language = getattr(Config, "LLM_OUTPUT_LANGUAGE", "ru")
+        system_prompt = """Ты эксперт по планированию интервью.
+Выбери из списка симуляционных Agent тех, кто лучше всего подходит для интервью по заданной теме.
 
-选择标准：
-1. Agent的身份/职业与采访主题相关
-2. Agent可能持有独特或有价值的观点
-3. 选择多样化的视角（如：支持方、反对方、中立方、专业人士等）
-4. 优先选择与事件直接相关的角色
+Критерии:
+1. Профиль/роль Agent релевантны теме интервью.
+2. Agent вероятно даст уникальный или ценный взгляд.
+3. Нужен баланс позиций и ролей (поддержка, критика, нейтральные, эксперты).
+4. Приоритет у участников, напрямую связанных с событием.
 
-返回JSON格式：
+Верни JSON:
 {
-    "selected_indices": [选中Agent的索引列表],
-    "reasoning": "选择理由说明"
-}"""
+    "selected_indices": [индексы выбранных Agent],
+    "reasoning": "краткое объяснение выбора на русском"
+}
+Только JSON."""
 
-        user_prompt = f"""采访需求：
+        user_prompt = f"""Требование к интервью:
 {interview_requirement}
 
-模拟背景：
-{simulation_requirement if simulation_requirement else "未提供"}
+Контекст симуляции:
+{simulation_requirement if simulation_requirement else "не указан"}
 
-可选择的Agent列表（共{len(agent_summaries)}个）：
+Список доступных Agent (всего {len(agent_summaries)}):
 {json.dumps(agent_summaries, ensure_ascii=False, indent=2)}
 
-请选择最多{max_agents}个最适合采访的Agent，并说明选择理由。"""
+Выбери максимум {max_agents} Agent и объясни выбор.
+reasoning пиши на языке {output_language}."""
 
         try:
             response = self.llm.chat_json(
@@ -1612,7 +1635,7 @@ class ZepToolsService:
             )
             
             selected_indices = response.get("selected_indices", [])[:max_agents]
-            reasoning = response.get("reasoning", "基于相关性自动选择")
+            reasoning = response.get("reasoning", "Автоматический выбор по релевантности")
             
             # 获取选中的Agent完整信息
             selected_agents = []
@@ -1629,7 +1652,7 @@ class ZepToolsService:
             # 降级：选择前N个
             selected = profiles[:max_agents]
             indices = list(range(min(max_agents, len(profiles))))
-            return selected, indices, "使用默认选择策略"
+            return selected, indices, "Использована стратегия выбора по умолчанию"
     
     def _generate_interview_questions(
         self,
@@ -1641,25 +1664,27 @@ class ZepToolsService:
         
         agent_roles = [a.get("profession", "未知") for a in selected_agents]
         
-        system_prompt = """你是一个专业的记者/采访者。根据采访需求，生成3-5个深度采访问题。
+        output_language = getattr(Config, "LLM_OUTPUT_LANGUAGE", "ru")
+        system_prompt = """Ты профессиональный интервьюер.
+Сгенерируй 3-5 глубоких вопросов по теме.
 
-问题要求：
-1. 开放性问题，鼓励详细回答
-2. 针对不同角色可能有不同答案
-3. 涵盖事实、观点、感受等多个维度
-4. 语言自然，像真实采访一样
-5. 每个问题控制在50字以内，简洁明了
-6. 直接提问，不要包含背景说明或前缀
+Требования:
+1. Открытые вопросы, стимулирующие развернутый ответ.
+2. Разные роли должны иметь возможность отвечать по-разному.
+3. Покрой факты, мнения и эмоции.
+4. Естественная формулировка как в реальном интервью.
+5. Кратко и ясно, без лишних префиксов.
 
-返回JSON格式：{"questions": ["问题1", "问题2", ...]}"""
+Верни JSON: {"questions": ["вопрос 1", "вопрос 2", ...]}.
+Язык вопросов: русский."""
 
-        user_prompt = f"""采访需求：{interview_requirement}
+        user_prompt = f"""Тема интервью: {interview_requirement}
 
-模拟背景：{simulation_requirement if simulation_requirement else "未提供"}
+Контекст симуляции: {simulation_requirement if simulation_requirement else "не указан"}
 
-采访对象角色：{', '.join(agent_roles)}
+Роли интервьюируемых: {', '.join(agent_roles)}
 
-请生成3-5个采访问题。"""
+Сгенерируй 3-5 вопросов на языке {output_language}."""
 
         try:
             response = self.llm.chat_json(
@@ -1670,14 +1695,14 @@ class ZepToolsService:
                 temperature=0.5
             )
             
-            return response.get("questions", [f"关于{interview_requirement}，您有什么看法？"])
+            return response.get("questions", [f"Каково ваше мнение по теме: {interview_requirement}?"])
             
         except Exception as e:
             logger.warning(f"生成采访问题失败: {e}")
             return [
-                f"关于{interview_requirement}，您的观点是什么？",
-                "这件事对您或您所代表的群体有什么影响？",
-                "您认为应该如何解决或改进这个问题？"
+                f"Какова ваша позиция по теме: {interview_requirement}?",
+                "Как это событие влияет на вас или вашу группу?",
+                "Какие решения или улучшения вы считаете наиболее реалистичными?"
             ]
     
     def _generate_interview_summary(
@@ -1695,28 +1720,30 @@ class ZepToolsService:
         for interview in interviews:
             interview_texts.append(f"【{interview.agent_name}（{interview.agent_role}）】\n{interview.response[:500]}")
         
-        system_prompt = """你是一个专业的新闻编辑。请根据多位受访者的回答，生成一份采访摘要。
+        output_language = getattr(Config, "LLM_OUTPUT_LANGUAGE", "ru")
+        system_prompt = """Ты профессиональный редактор.
+На основе ответов нескольких интервьюируемых подготовь сжатое резюме интервью.
 
-摘要要求：
-1. 提炼各方主要观点
-2. 指出观点的共识和分歧
-3. 突出有价值的引言
-4. 客观中立，不偏袒任何一方
-5. 控制在1000字内
+Требования к резюме:
+1. Выдели ключевые позиции сторон.
+2. Отдельно покажи точки согласия и разногласия.
+3. Добавь наиболее ценные цитаты.
+4. Сохраняй нейтральный тон.
+5. До 1000 слов.
 
-格式约束（必须遵守）：
-- 使用纯文本段落，用空行分隔不同部分
-- 不要使用Markdown标题（如#、##、###）
-- 不要使用分割线（如---、***）
-- 引用受访者原话时使用中文引号「」
-- 可以使用**加粗**标记关键词，但不要使用其他Markdown语法"""
+Ограничения по формату:
+- Обычные абзацы, разделенные пустой строкой.
+- Без markdown-заголовков и разделителей.
+- Цитаты оформляй в русских кавычках «».
+- Можно использовать **жирное** для ключевых слов.
+- Пиши на русском языке."""
 
-        user_prompt = f"""采访主题：{interview_requirement}
+        user_prompt = f"""Тема интервью: {interview_requirement}
 
-采访内容：
+Материалы интервью:
 {"".join(interview_texts)}
 
-请生成采访摘要。"""
+Сформируй итоговое резюме на языке {output_language}."""
 
         try:
             summary = self.llm.chat(
@@ -1732,4 +1759,4 @@ class ZepToolsService:
         except Exception as e:
             logger.warning(f"生成采访摘要失败: {e}")
             # 降级：简单拼接
-            return f"共采访了{len(interviews)}位受访者，包括：" + "、".join([i.agent_name for i in interviews])
+            return f"Проведено интервью с {len(interviews)} участниками: " + ", ".join([i.agent_name for i in interviews])

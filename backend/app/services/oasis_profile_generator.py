@@ -161,8 +161,8 @@ class OasisProfileGenerator:
     
     # 常见国家列表
     COUNTRIES = [
-        "China", "US", "UK", "Japan", "Germany", "France", 
-        "Canada", "Australia", "Brazil", "India", "South Korea"
+        "Россия", "США", "Великобритания", "Япония", "Германия", "Франция",
+        "Канада", "Австралия", "Бразилия", "Индия", "Южная Корея"
     ]
     
     # 个人类型实体（需要生成具体人设）
@@ -257,7 +257,7 @@ class OasisProfileGenerator:
             user_name=user_name,
             name=name,
             bio=profile_data.get("bio", f"{entity_type}: {name}"),
-            persona=profile_data.get("persona", entity.summary or f"A {entity_type} named {name}."),
+            persona=profile_data.get("persona", entity.summary or f"{name} — представитель типа {entity_type}."),
             karma=profile_data.get("karma", random.randint(500, 5000)),
             friend_count=profile_data.get("friend_count", random.randint(50, 500)),
             follower_count=profile_data.get("follower_count", random.randint(100, 1000)),
@@ -553,7 +553,7 @@ class OasisProfileGenerator:
                     if "bio" not in result or not result["bio"]:
                         result["bio"] = entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}"
                     if "persona" not in result or not result["persona"]:
-                        result["persona"] = entity_summary or f"{entity_name}是一个{entity_type}。"
+                        result["persona"] = entity_summary or f"{entity_name} — это {entity_type}."
                     
                     return result
                     
@@ -650,7 +650,7 @@ class OasisProfileGenerator:
         persona_match = re.search(r'"persona"\s*:\s*"([^"]*)', content)  # 可能被截断
         
         bio = bio_match.group(1) if bio_match else (entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}")
-        persona = persona_match.group(1) if persona_match else (entity_summary or f"{entity_name}是一个{entity_type}。")
+        persona = persona_match.group(1) if persona_match else (entity_summary or f"{entity_name} — это {entity_type}.")
         
         # 如果提取到了有意义的内容，标记为已修复
         if bio_match or persona_match:
@@ -665,12 +665,19 @@ class OasisProfileGenerator:
         logger.warning(f"JSON修复失败，返回基础结构")
         return {
             "bio": entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}",
-            "persona": entity_summary or f"{entity_name}是一个{entity_type}。"
+            "persona": entity_summary or f"{entity_name} — это {entity_type}."
         }
     
     def _get_system_prompt(self, is_individual: bool) -> str:
         """获取系统提示词"""
-        base_prompt = "你是社交媒体用户画像生成专家。生成详细、真实的人设用于舆论模拟,最大程度还原已有现实情况。必须返回有效的JSON格式，所有字符串值不能包含未转义的换行符。使用中文。"
+        output_language = getattr(Config, "LLM_OUTPUT_LANGUAGE", "ru")
+        base_prompt = (
+            "Ты эксперт по созданию реалистичных профилей пользователей соцмедиа для симуляции общественных дискуссий. "
+            "Верни только валидный JSON. "
+            "Все строковые значения должны быть в одну строку (без неэкранированных переносов). "
+            f"Текстовые поля (bio, persona, profession, interested_topics) пиши на языке: {output_language}. "
+            "Поле gender должно быть только на английском: male/female/other."
+        )
         return base_prompt
     
     def _build_individual_persona_prompt(
@@ -683,43 +690,42 @@ class OasisProfileGenerator:
     ) -> str:
         """构建个人实体的详细人设提示词"""
         
-        attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "无"
-        context_str = context[:3000] if context else "无额外上下文"
+        attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "нет данных"
+        context_str = context[:3000] if context else "дополнительный контекст отсутствует"
+        output_language = getattr(Config, "LLM_OUTPUT_LANGUAGE", "ru")
         
-        return f"""为实体生成详细的社交媒体用户人设,最大程度还原已有现实情况。
+        return f"""Сгенерируй подробный персональный профиль пользователя соцмедиа на основе данных сущности.
 
-实体名称: {entity_name}
-实体类型: {entity_type}
-实体摘要: {entity_summary}
-实体属性: {attrs_str}
+Название сущности: {entity_name}
+Тип сущности: {entity_type}
+Краткое описание: {entity_summary}
+Атрибуты сущности: {attrs_str}
 
-上下文信息:
+Контекст:
 {context_str}
 
-请生成JSON，包含以下字段:
+Верни JSON со следующими полями:
+1. bio: краткое описание профиля (до ~200 символов)
+2. persona: детальный цельный портрет (одна строка), включи:
+   - базовые сведения (возраст, профессия, образование, локация)
+   - фон и связь с событием
+   - характер и стиль коммуникации
+   - поведение в соцсетях (частота, формат, тон)
+   - позицию по теме и триггеры реакции
+   - уникальные черты (лексика, привычки, интересы)
+   - значимую "память" о действиях в контексте события
+3. age: целое число
+4. gender: только "male" или "female"
+5. mbti: валидный MBTI тип
+6. country: страна (строка, на языке {output_language})
+7. profession: профессия
+8. interested_topics: массив интересующих тем
 
-1. bio: 社交媒体简介，200字
-2. persona: 详细人设描述（2000字的纯文本），需包含:
-   - 基本信息（年龄、职业、教育背景、所在地）
-   - 人物背景（重要经历、与事件的关联、社会关系）
-   - 性格特征（MBTI类型、核心性格、情绪表达方式）
-   - 社交媒体行为（发帖频率、内容偏好、互动风格、语言特点）
-   - 立场观点（对话题的态度、可能被激怒/感动的内容）
-   - 独特特征（口头禅、特殊经历、个人爱好）
-   - 个人记忆（人设的重要部分，要介绍这个个体与事件的关联，以及这个个体在事件中的已有动作与反应）
-3. age: 年龄数字（必须是整数）
-4. gender: 性别，必须是英文: "male" 或 "female"
-5. mbti: MBTI类型（如INTJ、ENFP等）
-6. country: 国家（使用中文，如"中国"）
-7. profession: 职业
-8. interested_topics: 感兴趣话题数组
-
-重要:
-- 所有字段值必须是字符串或数字，不要使用换行符
-- persona必须是一段连贯的文字描述
-- 使用中文（除了gender字段必须用英文male/female）
-- 内容要与实体信息保持一致
-- age必须是有效的整数，gender必须是"male"或"female"
+Ограничения:
+- Только JSON, без markdown.
+- В строковых значениях не используй переносы строк.
+- Поля bio/persona/profession/interested_topics — на языке {output_language}.
+- persona должна быть реалистичной и согласованной с входными данными.
 """
 
     def _build_group_persona_prompt(
@@ -732,43 +738,42 @@ class OasisProfileGenerator:
     ) -> str:
         """构建群体/机构实体的详细人设提示词"""
         
-        attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "无"
-        context_str = context[:3000] if context else "无额外上下文"
+        attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "нет данных"
+        context_str = context[:3000] if context else "дополнительный контекст отсутствует"
+        output_language = getattr(Config, "LLM_OUTPUT_LANGUAGE", "ru")
         
-        return f"""为机构/群体实体生成详细的社交媒体账号设定,最大程度还原已有现实情况。
+        return f"""Сгенерируй подробный профиль официального/группового аккаунта в соцмедиа.
 
-实体名称: {entity_name}
-实体类型: {entity_type}
-实体摘要: {entity_summary}
-实体属性: {attrs_str}
+Название сущности: {entity_name}
+Тип сущности: {entity_type}
+Краткое описание: {entity_summary}
+Атрибуты сущности: {attrs_str}
 
-上下文信息:
+Контекст:
 {context_str}
 
-请生成JSON，包含以下字段:
+Верни JSON со следующими полями:
+1. bio: краткая официальная шапка аккаунта
+2. persona: детальная цельная роль аккаунта (одна строка), включи:
+   - сведения об организации и ее функциях
+   - позиционирование аккаунта и аудиторию
+   - стиль коммуникации и ограничения
+   - типы контента, частоту и периоды активности
+   - официальную позицию и реакцию на конфликтные темы
+   - организационную "память" о действиях в контексте события
+3. age: всегда 30 (виртуальный возраст институционального аккаунта)
+4. gender: всегда "other"
+5. mbti: MBTI, описывающий стиль аккаунта
+6. country: страна (строка, на языке {output_language})
+7. profession: функция/роль организации
+8. interested_topics: массив тематик аккаунта
 
-1. bio: 官方账号简介，200字，专业得体
-2. persona: 详细账号设定描述（2000字的纯文本），需包含:
-   - 机构基本信息（正式名称、机构性质、成立背景、主要职能）
-   - 账号定位（账号类型、目标受众、核心功能）
-   - 发言风格（语言特点、常用表达、禁忌话题）
-   - 发布内容特点（内容类型、发布频率、活跃时间段）
-   - 立场态度（对核心话题的官方立场、面对争议的处理方式）
-   - 特殊说明（代表的群体画像、运营习惯）
-   - 机构记忆（机构人设的重要部分，要介绍这个机构与事件的关联，以及这个机构在事件中的已有动作与反应）
-3. age: 固定填30（机构账号的虚拟年龄）
-4. gender: 固定填"other"（机构账号使用other表示非个人）
-5. mbti: MBTI类型，用于描述账号风格，如ISTJ代表严谨保守
-6. country: 国家（使用中文，如"中国"）
-7. profession: 机构职能描述
-8. interested_topics: 关注领域数组
-
-重要:
-- 所有字段值必须是字符串或数字，不允许null值
-- persona必须是一段连贯的文字描述，不要使用换行符
-- 使用中文（除了gender字段必须用英文"other"）
-- age必须是整数30，gender必须是字符串"other"
-- 机构账号发言要符合其身份定位"""
+Ограничения:
+- Только JSON, без markdown.
+- Не используй null.
+- Без переносов строк внутри строковых значений.
+- Текстовые поля должны быть на языке {output_language}.
+- age строго 30, gender строго "other"."""
     
     def _generate_profile_rule_based(
         self,
@@ -784,63 +789,63 @@ class OasisProfileGenerator:
         
         if entity_type_lower in ["student", "alumni"]:
             return {
-                "bio": f"{entity_type} with interests in academics and social issues.",
-                "persona": f"{entity_name} is a {entity_type.lower()} who is actively engaged in academic and social discussions. They enjoy sharing perspectives and connecting with peers.",
+                "bio": f"{entity_type}: интересуется учебой и общественными вопросами.",
+                "persona": f"{entity_name} — активный участник обсуждений на темы образования и общества, охотно делится мнением и взаимодействует с аудиторией.",
                 "age": random.randint(18, 30),
                 "gender": random.choice(["male", "female"]),
                 "mbti": random.choice(self.MBTI_TYPES),
                 "country": random.choice(self.COUNTRIES),
-                "profession": "Student",
-                "interested_topics": ["Education", "Social Issues", "Technology"],
+                "profession": "Студент",
+                "interested_topics": ["Образование", "Общественные вопросы", "Технологии"],
             }
         
         elif entity_type_lower in ["publicfigure", "expert", "faculty"]:
             return {
-                "bio": f"Expert and thought leader in their field.",
-                "persona": f"{entity_name} is a recognized {entity_type.lower()} who shares insights and opinions on important matters. They are known for their expertise and influence in public discourse.",
+                "bio": "Эксперт и заметный лидер мнений в своей сфере.",
+                "persona": f"{entity_name} — признанный {entity_type.lower()}, регулярно публикует экспертные оценки и влияет на публичную дискуссию.",
                 "age": random.randint(35, 60),
                 "gender": random.choice(["male", "female"]),
                 "mbti": random.choice(["ENTJ", "INTJ", "ENTP", "INTP"]),
                 "country": random.choice(self.COUNTRIES),
-                "profession": entity_attributes.get("occupation", "Expert"),
-                "interested_topics": ["Politics", "Economics", "Culture & Society"],
+                "profession": entity_attributes.get("occupation", "Эксперт"),
+                "interested_topics": ["Политика", "Экономика", "Культура и общество"],
             }
         
         elif entity_type_lower in ["mediaoutlet", "socialmediaplatform"]:
             return {
-                "bio": f"Official account for {entity_name}. News and updates.",
-                "persona": f"{entity_name} is a media entity that reports news and facilitates public discourse. The account shares timely updates and engages with the audience on current events.",
+                "bio": f"Официальный аккаунт {entity_name}. Новости и оперативные обновления.",
+                "persona": f"{entity_name} выступает как медийный аккаунт: публикует новости, формирует повестку и поддерживает диалог с аудиторией.",
                 "age": 30,  # 机构虚拟年龄
                 "gender": "other",  # 机构使用other
                 "mbti": "ISTJ",  # 机构风格：严谨保守
-                "country": "中国",
-                "profession": "Media",
-                "interested_topics": ["General News", "Current Events", "Public Affairs"],
+                "country": "Россия",
+                "profession": "Медиа",
+                "interested_topics": ["Новости", "Текущие события", "Общественная повестка"],
             }
         
         elif entity_type_lower in ["university", "governmentagency", "ngo", "organization"]:
             return {
-                "bio": f"Official account of {entity_name}.",
-                "persona": f"{entity_name} is an institutional entity that communicates official positions, announcements, and engages with stakeholders on relevant matters.",
+                "bio": f"Официальный аккаунт {entity_name}.",
+                "persona": f"{entity_name} представляет институциональный профиль: публикует официальные позиции и взаимодействует с заинтересованными сторонами.",
                 "age": 30,  # 机构虚拟年龄
                 "gender": "other",  # 机构使用other
                 "mbti": "ISTJ",  # 机构风格：严谨保守
-                "country": "中国",
+                "country": "Россия",
                 "profession": entity_type,
-                "interested_topics": ["Public Policy", "Community", "Official Announcements"],
+                "interested_topics": ["Публичная политика", "Сообщество", "Официальные заявления"],
             }
         
         else:
             # 默认人设
             return {
                 "bio": entity_summary[:150] if entity_summary else f"{entity_type}: {entity_name}",
-                "persona": entity_summary or f"{entity_name} is a {entity_type.lower()} participating in social discussions.",
+                "persona": entity_summary or f"{entity_name} — участник общественных обсуждений в соцмедиа.",
                 "age": random.randint(25, 50),
                 "gender": random.choice(["male", "female"]),
                 "mbti": random.choice(self.MBTI_TYPES),
                 "country": random.choice(self.COUNTRIES),
                 "profession": entity_type,
-                "interested_topics": ["General", "Social Issues"],
+                "interested_topics": ["Общие темы", "Социальные вопросы"],
             }
     
     def set_graph_id(self, graph_id: str):
@@ -939,7 +944,7 @@ class OasisProfileGenerator:
                     user_name=self._generate_username(entity.name),
                     name=entity.name,
                     bio=f"{entity_type}: {entity.name}",
-                    persona=entity.summary or f"A participant in social discussions.",
+                    persona=entity.summary or "Участник общественных обсуждений в соцмедиа.",
                     source_entity_uuid=entity.uuid,
                     source_entity_type=entity_type,
                 )
@@ -995,7 +1000,7 @@ class OasisProfileGenerator:
                         user_name=self._generate_username(entity.name),
                         name=entity.name,
                         bio=f"{entity_type}: {entity.name}",
-                        persona=entity.summary or "A participant in social discussions.",
+                        persona=entity.summary or "Участник общественных обсуждений в соцмедиа.",
                         source_entity_uuid=entity.uuid,
                         source_entity_type=entity_type,
                     )
@@ -1130,6 +1135,12 @@ class OasisProfileGenerator:
             "女": "female",
             "机构": "other",
             "其他": "other",
+            "мужчина": "male",
+            "женщина": "female",
+            "мужской": "male",
+            "женский": "female",
+            "другое": "other",
+            "организация": "other",
             # 英文已有
             "male": "male",
             "female": "female",
@@ -1164,14 +1175,14 @@ class OasisProfileGenerator:
                 "username": profile.user_name,
                 "name": profile.name,
                 "bio": profile.bio[:150] if profile.bio else f"{profile.name}",
-                "persona": profile.persona or f"{profile.name} is a participant in social discussions.",
+                "persona": profile.persona or f"{profile.name} — участник общественных обсуждений в соцмедиа.",
                 "karma": profile.karma if profile.karma else 1000,
                 "created_at": profile.created_at,
                 # OASIS必需字段 - 确保都有默认值
                 "age": profile.age if profile.age else 30,
                 "gender": self._normalize_gender(profile.gender),
                 "mbti": profile.mbti if profile.mbti else "ISTJ",
-                "country": profile.country if profile.country else "中国",
+                "country": profile.country if profile.country else "Россия",
             }
             
             # 可选字段
@@ -1197,4 +1208,3 @@ class OasisProfileGenerator:
         """[已废弃] 请使用 save_profiles() 方法"""
         logger.warning("save_profiles_to_json已废弃，请使用save_profiles方法")
         self.save_profiles(profiles, file_path, platform)
-

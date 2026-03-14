@@ -62,10 +62,39 @@ class LLMClient:
             kwargs["response_format"] = response_format
         
         response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
+        raw_content = response.choices[0].message.content
+        content = self._normalize_content(raw_content)
+
         # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
-        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        if content:
+            content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         return content
+
+    @staticmethod
+    def _normalize_content(content: Any) -> str:
+        """
+        统一不同提供商返回的 message.content 结构，避免 None/数组导致正则报错。
+
+        常见形态：
+        - str
+        - None
+        - list[{"type": "text", "text": "..."}]
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if text:
+                        parts.append(str(text))
+            return "\n".join(parts).strip()
+        return str(content)
     
     def chat_json(
         self,
@@ -100,4 +129,3 @@ class LLMClient:
             return json.loads(cleaned_response)
         except json.JSONDecodeError:
             raise ValueError(f"LLM返回的JSON格式无效: {cleaned_response}")
-

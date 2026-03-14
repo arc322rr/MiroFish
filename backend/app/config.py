@@ -31,6 +31,8 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    # Язык по умолчанию для текстовой генерации LLM (отчеты, саммари, вопросы и т.д.)
+    LLM_OUTPUT_LANGUAGE = os.environ.get('LLM_OUTPUT_LANGUAGE', 'ru')
     
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
@@ -72,4 +74,3 @@ class Config:
         if not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY 未配置")
         return errors
-
