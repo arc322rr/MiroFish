@@ -1,6 +1,0 @@
-services:
-  mirofish:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mirofish:local-arm64

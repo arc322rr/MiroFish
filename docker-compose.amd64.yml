@@ -1,4 +1,0 @@
-services:
-  mirofish:
-    platform: linux/amd64
-    image: ghcr.io/666ghj/mirofish:latest
